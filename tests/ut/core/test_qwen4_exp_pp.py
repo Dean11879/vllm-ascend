@@ -4,7 +4,30 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm_ascend.core.qwen4_exp_pp import validate_ple_pipeline_partition
+from vllm_ascend.core.qwen4_exp_pp import is_qwen4_exp_model_config, validate_ple_pipeline_partition
+
+
+@pytest.mark.parametrize(
+    "model_type,expected",
+    [
+        ("qwen4_exp", True),
+        ("qwen4_exp_text", True),
+        ("qwen4_exp_mtp", True),
+        ("qwen3_next", False),
+        ("deepseek_v4", False),
+        ("glm5next", False),
+        (None, False),
+    ],
+)
+def test_pp_adaptation_model_scope(model_type, expected):
+    config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type))
+    assert is_qwen4_exp_model_config(config) is expected
+
+
+def test_pp_scope_accepts_explicit_architecture_and_rejects_missing_config():
+    config = SimpleNamespace(hf_config=SimpleNamespace(architectures=["Qwen4ExpForConditionalGeneration"]))
+    assert is_qwen4_exp_model_config(config)
+    assert not is_qwen4_exp_model_config(None)
 
 
 @pytest.mark.parametrize("pp_size", [1, 2, 4, 8])

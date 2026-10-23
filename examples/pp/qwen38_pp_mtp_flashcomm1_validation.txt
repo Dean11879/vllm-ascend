@@ -16,7 +16,10 @@ What this branch adds
 PP foundation: PLE first-stage ownership checks and input preparation, empty
 local attention groups, six-region cache planning/allocation and V2 model state.
 Pinned-version compatibility: KV planning/builder imports, GDN parameter API
-and lazy Medusa imports. Secondary model callers retain compatible imports.
+and lazy Medusa imports. No other model implementation or 310P/TurboQuant
+caller changes are included. The Qwen-specific builder, draft markers,
+metadata initialization and GDN replacement path are gated by Qwen4Exp
+model configuration; non-Qwen models retain their original branch.
 MTP WIP: target/draft cache ownership, metadata builder initialization and
 per-batch draft token transport aligned with request IDs.
 The base already provides the Qwen MTP model, proposer, PP engine patch and

@@ -155,6 +155,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.qwen4_exp_pp import is_qwen4_exp_model_config
 from vllm_ascend.core.six_region_kv_cache_layout import (
     GDN,
     HIDDEN,
@@ -704,7 +705,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             text_config is not None
             and getattr(text_config, "ple_layer_ids", None)
-            and get_pp_group().is_first_rank
+            and (not is_qwen4_exp_model_config(self.model_config) or get_pp_group().is_first_rank)
         ):
             # Keep the Qwen4Exp package out of unrelated model startup paths.
             from vllm_ascend.models.qwen4_exp.input_adapter import (
@@ -3130,7 +3131,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if not self.use_async_scheduling:
-            if use_pp_spec_decode:
+            if use_pp_spec_decode and is_qwen4_exp_model_config(self.model_config):
                 self._attach_pp_draft_tokens(model_runner_output)
             return model_runner_output
 
@@ -4286,7 +4287,9 @@ class NPUModelRunner(GPUModelRunner):
             # layers (for example, PLE cache on a later pipeline stage).
             # Keep its block-table/drafter bookkeeping, but do not index an
             # absent local attention group to choose GDN metadata.
-            if self._has_gdn and self.attn_groups[kv_cache_gid]:
+            if self._has_gdn and (
+                not is_qwen4_exp_model_config(self.model_config) or self.attn_groups[kv_cache_gid]
+            ):
                 attn_group = self.attn_groups[kv_cache_gid][0]
                 builder = attn_group.get_metadata_builder(0)
                 if isinstance(builder, GDNAttentionMetadataBuilder):
@@ -5065,6 +5068,8 @@ class NPUModelRunner(GPUModelRunner):
         Ascend handles its proposer below in initialize_kv_cache, including
         PP stages without a local drafter and per-group kernel block sizes.
         """
+        if not is_qwen4_exp_model_config(self.model_config):
+            return super().initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
         for group_id in range(len(kv_cache_config.kv_cache_groups)):
             for attn_group in self.attn_groups[group_id]:
                 attn_group.create_metadata_builders(
@@ -7426,7 +7431,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # New Core planning reads explicit draft ownership instead of inferring
         # it from layer names. Preserve that flag in the Ascend V1 spec path.
-        if "is_draft" in KVCacheSpec.__dataclass_fields__:
+        if is_qwen4_exp_model_config(self.model_config) and "is_draft" in KVCacheSpec.__dataclass_fields__:
             for layer_name, spec in kv_cache_spec.items():
                 if getattr(attn_layers[layer_name], "is_draft_layer", False):
                     kv_cache_spec[layer_name] = replace(spec, is_draft=True)

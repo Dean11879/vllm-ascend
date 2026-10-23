@@ -36,11 +36,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
-
-try:
-    from transformers import DeepseekV4Config
-except ImportError:
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec
 

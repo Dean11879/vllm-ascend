@@ -350,7 +350,9 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
         kv_cache_spec.update(mamba_specs)
 
-    if "is_draft" in KVCacheSpec.__dataclass_fields__:
+    from vllm_ascend.core.qwen4_exp_pp import is_qwen4_exp_model_config
+
+    if is_qwen4_exp_model_config(vllm_config.model_config) and "is_draft" in KVCacheSpec.__dataclass_fields__:
         for layer_name, spec in kv_cache_spec.items():
             if getattr(attn_layers[layer_name], "is_draft_layer", False):
                 kv_cache_spec[layer_name] = replace(spec, is_draft=True)
