@@ -97,11 +97,13 @@ MTP device validation
 FlashComm1 Prefill device validation
 -----------------------------------
 Disable MTP to isolate the feature. Confirm the compatible communication
-backend, expert parallelism, TP>1 and DP>1. Inspect the effective configuration
+backend, expert parallelism and TP>1. The existing Ascend parallel-config
+patch also permits DP=1. Inspect the effective configuration
 and execution evidence that sequence-parallel MoE/FlashComm1 actually runs.
-TP4/PP2/DP1 on eight cards does not satisfy DP>1 and cannot prove this feature.
-TP2/PP2/DP2 uses eight cards, but PLE first-stage capacity and layer partition
-must be checked before launch. No final capacity-safe configuration is certified.
+TP4/PP2/DP1 with EP uses eight cards and is a candidate topology; verify the
+effective SP switch and actual model communication, rather than relying only
+on the flag. PLE ownership, capacity and partition must be checked before
+launch. No final FlashComm1+PP configuration is certified.
 Once feasible, compare FlashComm1 off/on under the same parallel configuration,
 with max_tokens=1 to scope the check to Prefill/first-token generation. Retain
 first-token output, appropriate logits comparisons and actual communication
@@ -117,3 +119,26 @@ This Draft branch includes the reference V1 MTP+PP correctness repair and
 prepares exact-SHA regression testing. V2 QSA initialization, full accuracy,
 performance, async/prefix combinations and FlashComm1 Prefill+PP remain outside
 the reference smoke-pass conclusion.
+
+Startup compatibility follow-up
+-------------------------------
+The shared startup imports used by Qwen still refer to two helpers in the old
+upstream kv_cache_utils module. The shared runner also imports a removed
+configuration module. The adapter maps that old path to the real Transformers
+configuration module used by the reference upstream (not a fake configuration
+class). The Ascend planning adapter re-exports the
+actual moved helpers only when those legacy names are absent; it does not
+change cache algorithms, edit the upstream checkout, or edit other model
+implementation files. This import compatibility is process-wide because it
+runs before CLI model configuration exists. It is not a per-model behavior
+change or evidence that another model has been tested.
+The original may_override_num_blocks ImportError is reproduced on be8cf08;
+with this fix the actual serve --help plugin/argument-parser path exits zero
+in the same reference environment. The actual Qwen model class and V1
+NPUModelRunner also import successfully in an isolated container exposing
+physical NPUs 0-7 on host120. Six dependency-isolated import compatibility
+cases and 11 Qwen MTP state regressions pass; non-Qwen cases are excluded.
+These are import/state checks, not model-loading or inference passes. Full
+project CPU collection and all-file CI were not completed for this follow-up;
+only scoped checks ran. Exact revision NPU inference remains a separate
+acceptance requirement.
