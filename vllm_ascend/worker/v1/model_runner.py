@@ -216,7 +216,6 @@ from vllm_ascend.spec_decode.interfaces import (
     SupportsPerGroupBlockTables,
     SupportsPerGroupKernelBlockSizes,
 )
-from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.qwen4_exp import AscendQwen4ExpMTPProposer
@@ -291,6 +290,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
     from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
+    from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -701,7 +701,11 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.qwen4_exp_input_adapter = None
         text_config = getattr(self.model_config, "hf_text_config", None)
-        if text_config is not None and getattr(text_config, "ple_layer_ids", None):
+        if (
+            text_config is not None
+            and getattr(text_config, "ple_layer_ids", None)
+            and get_pp_group().is_first_rank
+        ):
             # Keep the Qwen4Exp package out of unrelated model startup paths.
             from vllm_ascend.models.qwen4_exp.input_adapter import (
                 build_qwen4_exp_input_adapter,
@@ -2140,7 +2144,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._num_valid_draft_tokens,
                 batch_size,
             )
-        elif isinstance(self.drafter, AscendMedusaProposer):
+        elif self.speculative_config is not None and self.speculative_config.method == "medusa":
             draft_token_ids = self.drafter.propose(
                 # Dynamic SD: forward the scheduled K (equals the configured
                 # maximum when the feature is disabled).
@@ -2377,6 +2381,18 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens] = 0
             self.draft_token_ids_event.record()
+
+    def _attach_pp_draft_tokens(self, output: ModelRunnerOutput) -> None:
+        """Carry this batch's drafts with its PP output, aligned by request ID.
+
+        The PP EngineCore adapter consumes these alongside sampled tokens;
+        fetching global latest drafts later can refer to a different batch.
+        """
+        drafts = self.take_draft_token_ids()
+        if drafts is None:
+            return
+        by_request = dict(zip(drafts.req_ids, drafts.draft_token_ids))
+        output.spec_token_ids = [by_request.get(req_id, []) for req_id in output.req_ids]
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         out = super().take_draft_token_ids()
@@ -3114,6 +3130,8 @@ class NPUModelRunner(GPUModelRunner):
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if not self.use_async_scheduling:
+            if use_pp_spec_decode:
+                self._attach_pp_draft_tokens(model_runner_output)
             return model_runner_output
 
         # R3 is served by the V2 runner through vLLM's AuxOutput connector.
@@ -4264,7 +4282,11 @@ class NPUModelRunner(GPUModelRunner):
             # But gdn needs an unpadded one.
             # gdn_query_start_loc is an unpadded version of query_start_loc.
             # TODO delete it if fia's check is removed.
-            if self._has_gdn:
+            # PP retains global cache group IDs even when a group has no local
+            # layers (for example, PLE cache on a later pipeline stage).
+            # Keep its block-table/drafter bookkeeping, but do not index an
+            # absent local attention group to choose GDN metadata.
+            if self._has_gdn and self.attn_groups[kv_cache_gid]:
                 attn_group = self.attn_groups[kv_cache_gid][0]
                 builder = attn_group.get_metadata_builder(0)
                 if isinstance(builder, GDNAttentionMetadataBuilder):
@@ -5033,6 +5055,27 @@ class NPUModelRunner(GPUModelRunner):
             self._debugger_started = False
 
         self.debugger.step(**kwargs)
+
+    def initialize_metadata_builders(
+        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
+    ) -> None:
+        """Build target metadata; initialize the Ascend drafter after KV binding.
+
+        The upstream helper also initializes CUDA-specific proposer classes.
+        Ascend handles its proposer below in initialize_kv_cache, including
+        PP stages without a local drafter and per-group kernel block sizes.
+        """
+        for group_id in range(len(kv_cache_config.kv_cache_groups)):
+            for attn_group in self.attn_groups[group_id]:
+                attn_group.create_metadata_builders(
+                    self.vllm_config,
+                    self.device,
+                    kernel_block_sizes[group_id] if group_id < len(kernel_block_sizes) else None,
+                    num_metadata_builders=(
+                        self.parallel_config.num_ubatches if self.parallel_config.use_ubatching else 1
+                    ),
+                )
+        self.calculate_reorder_batch_threshold()
 
     def initialize_kv_cache(
         self,
@@ -7380,6 +7423,13 @@ class NPUModelRunner(GPUModelRunner):
             for layer_name in attn_layer_names:
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
+
+        # New Core planning reads explicit draft ownership instead of inferring
+        # it from layer names. Preserve that flag in the Ascend V1 spec path.
+        if "is_draft" in KVCacheSpec.__dataclass_fields__:
+            for layer_name, spec in kv_cache_spec.items():
+                if getattr(attn_layers[layer_name], "is_draft_layer", False):
+                    kv_cache_spec[layer_name] = replace(spec, is_draft=True)
 
         if self.sparse_kv_offload_enabled:
             self.kv_cache_spec = kv_cache_spec # reserve for Sparse KV offload usage

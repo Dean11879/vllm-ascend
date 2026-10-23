@@ -1,0 +1,90 @@
+Qwen3.8-Flash-Next PP integration handoff (WIP)
+
+Scope and versions
+------------------
+Base branch: feat/qwen38-flash-next-main-v1
+Base revision: adc05909ea0125d058c2c9eb3131e761929f2551
+Reference vLLM: 876d5da8316a81180b8c7f10dea5ffab5b5a849f (unmodified)
+Model: Qwen3.8-Flash-Next-w8a8 (unmodified checkpoint)
+Reference device environment: Ascend 9382/aarch64, driver 26.1.0.b087,
+CANN 9.2. Rebuild native extensions for the actual test host/environment.
+This target branch includes updates beyond the reference experiment baseline;
+check dependencies and rerun tests on the exact merged SHA.
+
+What this branch adds
+---------------------
+PP foundation: PLE first-stage ownership checks and input preparation, empty
+local attention groups, six-region cache planning/allocation and V2 model state.
+Pinned-version compatibility: KV planning/builder imports, GDN parameter API
+and lazy Medusa imports. Secondary model callers retain compatible imports.
+MTP WIP: target/draft cache ownership, metadata builder initialization and
+per-batch draft token transport aligned with request IDs.
+The base already provides the Qwen MTP model, proposer, PP engine patch and
+FlashComm1 implementation. This branch adds no dedicated FlashComm1 kernel.
+Graph replay is outside this eager validation scope.
+
+Known results and unresolved issues
+----------------------------------
+Previous r9 V1 MTP TP4/PP2 experiment: 83 draft tokens, 10 accepted, but all
+three short request outputs were abnormal. This is NOT a correctness pass.
+Previous V2 MTP initialization: Unsupported attention backend AscendQSABackend.
+Previous CPU regression: 45 passed in the reference Linux experiment only;
+this does not certify this branch, native execution, or MTP correctness.
+FlashComm1 Prefill + PP has no completed active-path correctness comparison.
+
+CPU regression entry points (inside a compatible vLLM/Ascend environment)
+-----------------------------------------------------------------------
+python -m pytest -q \
+  tests/ut/core/test_qwen4_exp_pp.py \
+  tests/ut/core/test_six_region_kv_cache_layout.py \
+  tests/ut/models/qwen4_exp/test_pp_model_state.py \
+  tests/ut/patch/platform/test_qwen4_exp_pp_config.py \
+  tests/ut/patch/platform/test_packed_kv_cache_compat.py \
+  tests/ut/patch/platform/test_patch_pp_mtp.py \
+  tests/ut/worker/test_pp_empty_attn_groups.py \
+  tests/ut/worker/test_pp_target_metadata_builders.py \
+  tests/ut/worker/test_pp_draft_output_transport.py \
+  tests/ut/spec_decode/test_qwen4_exp_cache_groups.py \
+  tests/ut/spec_decode/test_qwen4_exp_proposer_dispatch.py
+Run tests/ut/worker/test_attn_utils_v2.py as well for V2 changes.
+
+MTP device validation
+---------------------
+1. Use only allocated, genuinely free cards. Verify process rows and HBM before
+   launch; isolate code, container, selected devices, caches and ports.
+2. Establish MTP off/on with PP=1 first, then PP=2. Keep the same weights,
+   prompts, sampling parameters and workload. Record TP changes separately.
+3. Start with V1, eager, synchronous scheduling and text-only requests.
+   Control: --enforce-eager --no-async-scheduling
+   --limit-mm-per-prompt '{"image":0,"video":0}'
+   MTP adds: --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
+   Select the runner with VLLM_USE_V2_MODEL_RUNNER=0 or 1.
+4. Save raw requests/responses and token IDs, draft/accepted metrics, per-worker
+   logs, exit codes, layer partitions, effective configuration and model/source
+   hashes. Exercise repeated requests and continuous Decode.
+5. A successful startup or zero generated drafts is not a pass. Require actual
+   speculation and output correctness against the control. Investigate TP-only
+   effects before attributing differences to PP. Do not bypass the V2 QSA backend
+   contract by relabeling it as another attention backend.
+
+FlashComm1 Prefill device validation
+-----------------------------------
+Disable MTP to isolate the feature. Confirm the compatible communication
+backend, expert parallelism, TP>1 and DP>1. Inspect the effective configuration
+and execution evidence that sequence-parallel MoE/FlashComm1 actually runs.
+TP4/PP2/DP1 on eight cards does not satisfy DP>1 and cannot prove this feature.
+TP2/PP2/DP2 uses eight cards, but PLE first-stage capacity and layer partition
+must be checked before launch. No final capacity-safe configuration is certified.
+Once feasible, compare FlashComm1 off/on under the same parallel configuration,
+with max_tokens=1 to scope the check to Prefill/first-token generation. Retain
+first-token output, appropriate logits comparisons and actual communication
+execution evidence. A flag that is silently disabled is not feature coverage.
+
+Acceptance and reporting
+------------------------
+Report V1 and V2 independently as passed, unsupported with a concrete reason,
+failed, or unverified. Startup, CPU-only tests and process exit are insufficient.
+Do not claim full model accuracy or performance from short smoke requests.
+Record the tested commit and environment so the receiver can reproduce results.
+This WIP branch prepares continued testing; it is not a declaration that either
+MTP+PP or FlashComm1 Prefill+PP is complete.
