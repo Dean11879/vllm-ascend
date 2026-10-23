@@ -1,4 +1,4 @@
-pr: 16981
+pr: 3
 entries:
   - category: other
     text: "WIP: prepare Qwen3.8-Flash-Next PP foundations and MTP draft-state compatibility for integration testing; MTP correctness and FlashComm1 Prefill activation remain unverified on this target revision."
