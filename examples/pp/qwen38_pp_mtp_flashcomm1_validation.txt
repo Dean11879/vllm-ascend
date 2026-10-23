@@ -20,8 +20,11 @@ and lazy Medusa imports. No other model implementation or 310P/TurboQuant
 caller changes are included. The Qwen-specific builder, draft markers,
 metadata initialization and GDN replacement path are gated by Qwen4Exp
 model configuration; non-Qwen models retain their original branch.
-MTP WIP: target/draft cache ownership, metadata builder initialization and
-per-batch draft token transport aligned with request IDs.
+MTP: target/draft cache ownership, metadata builder initialization, per-batch
+draft token transport aligned with request IDs, accepted-draft history and GDN
+accepted-count feedback on non-sampling PP stages, and persistent speculative
+state across zero-token PP bubbles. The new runner path is Qwen4Exp-only;
+non-Qwen models keep the original update and batch-lifecycle path.
 The base already provides the Qwen MTP model, proposer, PP engine patch and
 FlashComm1 implementation. This branch adds no dedicated FlashComm1 kernel.
 Graph replay is outside this eager validation scope.
@@ -30,10 +33,30 @@ Known results and unresolved issues
 ----------------------------------
 Previous r9 V1 MTP TP4/PP2 experiment: 83 draft tokens, 10 accepted, but all
 three short request outputs were abnormal. This is NOT a correctness pass.
+The subsequent local r11 reference experiment repaired accepted-draft history,
+GDN accepted counts and PP idle-row eviction. On host 80.5.17.120, physical NPUs 0-7,
+V1 TP4/PP2 eager TEXTONLY MTP1 completed three serial requests of 32 tokens with
+49 draft/44 accepted tokens and 3/3 exact text matches to the freshly rerun
+MTP-off control. A second PP2 run without debug hooks and a PP1/MTP regression
+also matched 3/3. Related reference CPU regressions: 56 passed.
+Those experiments used the cb36177d-based local adaptation plus reference
+vLLM 876d5da; they are provenance for this fix, not a device certification of
+this fork's newer base or its final pushed SHA. Rerun the matrix below on the
+exact source branch SHA with matching dependencies/native extensions.
 Previous V2 MTP initialization: Unsupported attention backend AscendQSABackend.
 Previous CPU regression: 45 passed in the reference Linux experiment only;
 this does not certify this branch, native execution, or MTP correctness.
 FlashComm1 Prefill + PP has no completed active-path correctness comparison.
+
+Source-branch checks for this update: 15 dependency-isolated regression cases
+passed using actual runner method bodies extracted from source, including four
+non-Qwen fallbacks. These are not full module-import tests. 16 scope checks
+passed and eight other-model/310P/TurboQuant files equal the target base.
+The full project CPU suite was attempted with reference vLLM 876d5da but blocked
+before collection by pre-existing non-Qwen dependency imports (DeepseekV4Config
+legacy module path; may_override_num_blocks API). No other-model production
+source was changed to bypass those failures. Use matching dependencies and run
+the full suite below; exact-branch NPU accuracy and performance remain pending.
 
 CPU regression entry points (inside a compatible vLLM/Ascend environment)
 -----------------------------------------------------------------------
@@ -47,6 +70,7 @@ python -m pytest -q \
   tests/ut/worker/test_pp_empty_attn_groups.py \
   tests/ut/worker/test_pp_target_metadata_builders.py \
   tests/ut/worker/test_pp_draft_output_transport.py \
+  tests/ut/worker/test_pp_accepted_token_counts.py \
   tests/ut/spec_decode/test_qwen4_exp_cache_groups.py \
   tests/ut/spec_decode/test_qwen4_exp_proposer_dispatch.py
 Run tests/ut/worker/test_attn_utils_v2.py as well for V2 changes.
@@ -89,5 +113,7 @@ Report V1 and V2 independently as passed, unsupported with a concrete reason,
 failed, or unverified. Startup, CPU-only tests and process exit are insufficient.
 Do not claim full model accuracy or performance from short smoke requests.
 Record the tested commit and environment so the receiver can reproduce results.
-This WIP branch prepares continued testing; it is not a declaration that either
-MTP+PP or FlashComm1 Prefill+PP is complete.
+This Draft branch includes the reference V1 MTP+PP correctness repair and
+prepares exact-SHA regression testing. V2 QSA initialization, full accuracy,
+performance, async/prefix combinations and FlashComm1 Prefill+PP remain outside
+the reference smoke-pass conclusion.

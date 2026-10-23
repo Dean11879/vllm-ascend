@@ -1061,7 +1061,88 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
         ).unsqueeze(1)
 
+    def _get_pp_accepted_token_counts(self, scheduler_output: "SchedulerOutput") -> dict[str, int]:
+        """Recover last step's accepted counts on non-sampling PP stages.
+
+        Only the final stage runs the sampler/state postprocess. The scheduler
+        returns the authoritative output length to every stage; compare it
+        with the previous local length before the parent updates that state.
+        ``new_token_ids`` contains the next input, not every accepted token.
+        """
+        pp = get_pp_group()
+        if (
+            self.use_async_scheduling
+            or pp.world_size == 1
+            or pp.is_last_rank
+            or self.speculative_config is None
+            or not self.model_config.is_hybrid
+        ):
+            return {}
+        data = scheduler_output.scheduled_cached_reqs
+        counts = {}
+        for index, req_id in enumerate(data.req_ids):
+            state = self.requests.get(req_id)
+            if state is None or req_id in data.resumed_req_ids:
+                continue
+            count = data.num_output_tokens[index] - len(state.output_token_ids)
+            if count > 0:
+                counts[req_id] = count
+        return counts
+
+    def _restore_pp_accepted_draft_tokens(self, counts: dict[str, int]) -> None:
+        """Commit accepted draft prefixes before appending the sampled input.
+
+        The next scheduler payload contains only the final (bonus/correction)
+        token. Accepted draft IDs are still in the previous persistent batch;
+        without committing them, the parent broadcasts that final token over
+        their CPU-cache positions and loses the request's token history.
+        """
+        for req_id, count in counts.items():
+            num_drafts = count - 1
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            if num_drafts <= 0 or req_index is None:
+                continue
+            drafts = self.input_batch.spec_token_ids[req_index]
+            assert num_drafts <= len(drafts), "PP acceptance exceeds the previous batch's drafts"
+            self.requests[req_id].output_token_ids.extend(drafts[:num_drafts])
+            self.input_batch.num_tokens_no_spec[req_index] += num_drafts
+
+    def _preserve_pp_mtp_idle_batch(self, scheduler_output: "SchedulerOutput") -> "SchedulerOutput":
+        """Do not evict in-flight speculative state for an empty PP bubble.
+
+        These zero-valued keys are used only by the parent's row-lifecycle
+        update. The outer execute_model still sees the original empty output,
+        and no model tokens are added. Finish/preemption cleanup stays active.
+        """
+        if (
+            scheduler_output.total_num_scheduled_tokens != 0
+            or self.use_async_scheduling
+            or self.speculative_config is None
+            or not self.model_config.is_hybrid
+            or get_pp_group().world_size == 1
+        ):
+            return scheduler_output
+        removed = (
+            scheduler_output.finished_req_ids
+            | (scheduler_output.preempted_req_ids or set())
+            | scheduler_output.scheduled_cached_reqs.resumed_req_ids
+        )
+        retained = {req_id: 0 for req_id in self.input_batch.req_id_to_index if req_id not in removed}
+        if not retained:
+            return scheduler_output
+        return replace(scheduler_output, num_scheduled_tokens=retained)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        # Keep this compatibility path exclusive to Qwen3.8 Flash Next.
+        use_qwen_pp_mtp = (
+            is_qwen4_exp_model_config(self.model_config)
+            and self.speculative_config is not None
+            and not self.use_async_scheduling
+            and get_pp_group().world_size > 1
+        )
+        pp_accepted_counts = self._get_pp_accepted_token_counts(scheduler_output) if use_qwen_pp_mtp else {}
+        if use_qwen_pp_mtp:
+            self._restore_pp_accepted_draft_tokens(pp_accepted_counts)
         self._update_replay_requests(scheduler_output)
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
@@ -1096,7 +1177,13 @@ class NPUModelRunner(GPUModelRunner):
                 new_block_ids_to_zero=[],
                 kv_cache_block_copies=[],
             )
-        sampling_metadata = super()._update_states(scheduler_output)
+        lifecycle_output = self._preserve_pp_mtp_idle_batch(scheduler_output) if use_qwen_pp_mtp else scheduler_output
+        sampling_metadata = super()._update_states(lifecycle_output)
+        # The parent may condense or reorder InputBatch; restore by request ID.
+        for req_id, count in pp_accepted_counts.items():
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            if req_index is not None:
+                self.input_batch.num_accepted_tokens_cpu[req_index] = count
         self._track_tmp_encoder_cache_refs(scheduler_output)
         return sampling_metadata
 
