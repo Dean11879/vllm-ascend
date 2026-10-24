@@ -1,0 +1,15 @@
+--- original/arch22/block/block_epilogue_hc_v1.hpp
++++ alignment_fix_v1/arch22/block/block_epilogue_hc_v1.hpp
+@@ -255,7 +255,11 @@
+             if constexpr (!std::is_same_v<Element, float>) {
+                 Cast(work, src.template ReinterpretCast<Element>(), RoundMode::CAST_NONE, nElem);
+                 PipeBarrier<PIPE_V>();
+-                DataCopy(src, work, nElem);
++                // UB-to-UB DataCopy requires a 32-byte multiple (8 FP32s).
++                // Both slots are allocated with slotBytes rounded to 32B.
++                // Only nElem valid elements participate in inject computation.
++                const uint32_t copyCount = (nElem + 7u) & ~7u;
++                DataCopy(src, work, copyCount);
+                 PipeBarrier<PIPE_V>();
+             }
+                 HcInjectCompute(dst, src, work, nElem, invC);

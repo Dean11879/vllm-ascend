@@ -1,0 +1,24 @@
+{
+  "upstream_pr": "https://github.com/vllm-project/vllm-ascend/pull/16981",
+  "pr_author_repository": "shaopeng-666/vllm-ascend",
+  "pr_author_branch": "feat/qwen38-flash-next-main-v1",
+  "vllm_ascend_base_commit": "adc05909ea0125d058c2c9eb3131e761929f2551",
+  "vllm_commit": "a98247ab4db686ee03c66d5feb3c761e52a2f8ab",
+  "tested_source_sha256": {
+    "vllm_ascend/models/qwen4_exp/model.py": "965afe5694f444f093c4f421d004e7ca485a8847e9dbf8c395cdbd40df7639e2",
+    "vllm_ascend/models/qwen4_exp/hc_fused.py": "1a97507ee707f0fda6c6a05957991de6aa4846513dcb2c4ecc4cd0ae7804fb1e"
+  },
+  "vendor_release": "text_gated_residual_release_20261022",
+  "vendor_build_variant": "hc_a3_alignfix_v1 / Ascend910_9382 / CANN 9.2.0",
+  "vendor_source_change": {
+    "file": "arch22/block/block_epilogue_hc_v1.hpp",
+    "sha256_before": "9ca52828d141abe8d697b76b04f62e13ac2714cd489a683942c01ba91e7e6036",
+    "sha256_after": "016d2f55b268c8b597a2b062678ee2f4a4d19ac696b157495f0989cc242c56a6",
+    "patch": "vendor_inject_alignment.patch",
+    "applies_to": "external supplier source tree, not the vllm-ascend tree"
+  },
+  "token_padding": false,
+  "vendor_wheel_and_binaries_included": false,
+  "accuracy_retested_for_tp8_m16": false,
+  "numerical_equivalence_claimed": false
+}
