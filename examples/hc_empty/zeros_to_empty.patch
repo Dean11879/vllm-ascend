@@ -1,5 +1,5 @@
---- vendor_original/text_gated_residual.cpp
-+++ empty_test/text_gated_residual.cpp
+--- a/text_gated_residual.cpp
++++ b/text_gated_residual.cpp
 @@ -37,8 +37,8 @@
      {
          auto local_device = c10::Device(x.device());

@@ -25,8 +25,8 @@ Check `text_gated_residual.cpp` SHA256 before applying:
 From that directory, run (use the absolute branch checkout path):
 
 ```bash
-git apply --check /path/to/vllm-ascend/examples/hc_empty/zeros_to_empty.patch
-git apply /path/to/vllm-ascend/examples/hc_empty/zeros_to_empty.patch
+git -c core.autocrlf=false apply --check /path/to/vllm-ascend/examples/hc_empty/zeros_to_empty.patch
+git -c core.autocrlf=false apply /path/to/vllm-ascend/examples/hc_empty/zeros_to_empty.patch
 ```
 
 Expected patched SHA256:
