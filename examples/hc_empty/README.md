@@ -55,9 +55,9 @@ Remotes are local Git configuration, not branch contents. For another clone:
 git remote set-url origin https://github.com/Dean11879/vllm-ascend.git
 git remote add upstream https://github.com/vllm-project/vllm-ascend.git
 git fetch upstream main
-git switch feat/hc-ascendc-empty-main
+git switch qwen38-hc-adapt
 git merge upstream/main
 ```
 
-Resolve any HC interface conflicts, validate, then `git push origin feat/hc-ascendc-empty-main`.
+Resolve any HC interface conflicts, validate, then `git push origin qwen38-hc-adapt`.
 GitHub Sync fork updates the fork's selected/default branch; it does not automatically merge upstream into this HC feature branch.
