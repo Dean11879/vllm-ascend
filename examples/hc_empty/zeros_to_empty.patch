@@ -1,0 +1,13 @@
+--- vendor_original/text_gated_residual.cpp
++++ empty_test/text_gated_residual.cpp
+@@ -37,8 +37,8 @@
+     {
+         auto local_device = c10::Device(x.device());
+         const c10::OptionalDeviceGuard device_guard(local_device);
+-        mixed = at::zeros({x.size(0), x.size(1), hidden}, x.options());
+-        inject = w_gate.has_value() ? at::zeros({x.size(0), x.size(1), channels}, x.options()) :
++        mixed = at::empty({x.size(0), x.size(1), hidden}, x.options());
++        inject = w_gate.has_value() ? at::empty({x.size(0), x.size(1), channels}, x.options()) :
+                  at::empty({0}, x.options());
+         inv_rms_t = need_backward ? at::zeros({x.size(0), x.size(1), channels}, x.options().dtype(at::kFloat)) :
+                     at::empty({0}, x.options().dtype(at::kFloat));
