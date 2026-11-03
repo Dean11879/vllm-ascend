@@ -44,7 +44,7 @@ M16/32/64/128/256/512 vendor precision cases passed with FP32 gamma.
 M16/32/64/128/256 graph profiling confirmed removal of the two output zero kernels.
 These are historical component results, not full-model validation of this new main-based branch.
 `gamma=None` remains a known vendor issue; model adapter supplies raw FP32 gamma.
-This publication has local Python syntax and diff checks only; NPU validation against current main is still required.
+The 2026-11-03 module smoke validation below covers this main-based adapter; full-model validation is still required.
 The adapter inherits the upstream checkpoint contract. Remove global class substitution when an upstream supported HC factory becomes available.
 
 ## Git remotes and future sync
@@ -61,3 +61,41 @@ git merge upstream/main
 
 Resolve any HC interface conflicts, validate, then `git push origin qwen38-hc-adapt`.
 GitHub Sync fork updates the fork's selected/default branch; it does not automatically merge upstream into this HC feature branch.
+
+## 2026-11-03 debug and module smoke validation
+
+Use the paired vLLM source revision in `.github/vllm-main-verified.commit`:
+`544f182d9f0c9bfe8bd7645525951d5e3692a542` for this branch baseline.
+The old image vLLM revision `ced6857afa0ea7b2e3f0846a62e1394e90f15607`
+lacks the PLE module path required by current Ascend main.
+The validated Python dependency overrides were Transformers 5.19.0 and
+Tokenizers 0.23.2 (image Transformers 5.14.1 cannot import Qwen4ExpTextConfig).
+Use the matching vLLM requirements when preparing a full deployment.
+
+On 109, the isolated test used CANN 9.2.0, Torch 2.10.0+cpu,
+torch-npu 2.10.0.post7 and Python 3.12.13. Only physical device 4 was mapped;
+inside this container its visible logical index is 0, so
+`ASCEND_RT_VISIBLE_DEVICES=0` was required, not 4.
+Set `TMPDIR` to a writable executable directory with enough space for installation
+and compilation. Keep extension caches isolated from older vendor builds.
+
+The host Docker 20.10.8 default seccomp configuration blocked even a basic Python
+thread and ninja process creation. A controlled diagnostic container with
+`--security-opt seccomp=unconfined` passed both checks and compiled the wrapper.
+This is an environment diagnosis, not a requirement to disable security globally;
+use an approved compatible container policy for deployment.
+
+The patch is stored with LF via a directory-local `.gitattributes`; validation
+checks the Git-staged patch against the original vendor source.
+The adapter reads `config.hc_lowrank` when slicing the merged projection weight,
+because the paired vLLM no longer defines the old `lora_rank` attribute.
+Projection sizes and HC mathematical operations are unchanged.
+
+Passed on one NPU: fresh C++ wrapper compilation, model module import/class wiring,
+weight preparation, and complete HC combine_and_mix eager/graph replay for
+M=16,32,64,128,256 with gate enabled and disabled. Synthetic BF16 weights/inputs
+were used with FP32 gamma; outputs were finite and graph replay matched eager
+exactly. This is smoke coverage, not independent golden precision acceptance,
+full-model execution, or a performance result. The complete Ascend repository
+native build was not repeated; only the vendor wrapper and Triton combine were
+compiled for this check.

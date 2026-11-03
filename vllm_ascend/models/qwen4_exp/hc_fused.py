@@ -94,8 +94,8 @@ class AscendTextGatedResidual(GatedResidual):
         self._textgr_gamma = gamma.contiguous()
         if self.use_combine:
             merged = self.input_mix_weight_down_block_inject.weight.detach()
-            self._textgr_down = merged[: self.lora_rank].contiguous()
-            self._textgr_gate = merged[self.lora_rank : self.lora_rank + self.hc_count].contiguous()
+            self._textgr_down = merged[: self.config.hc_lowrank].contiguous()
+            self._textgr_gate = merged[self.config.hc_lowrank : self.config.hc_lowrank + self.hc_count].contiguous()
         else:
             self._textgr_down = self.input_mix_weight_down.weight.detach().contiguous()
             self._textgr_gate = None
