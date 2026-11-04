@@ -94,10 +94,7 @@ def qsa_select_paged_tokens_lightning(
     if not rows:
         return out
 
-    # Keep unused ABI columns deterministic; MTP copies complete rows.
-    out.fill_(-1)
     block_topk = token_topk // compress_ratio
-    packed_width = block_topk + compress_ratio - 1
     score_weight = 1.0 / math.sqrt(query.shape[2])
     row_requests = token_to_req.to(torch.int64)
     row_sequence_lengths = sequence_lengths[row_requests]
@@ -162,10 +159,12 @@ def qsa_select_paged_tokens_lightning(
     pack_qsa_group_indices_npu(
         groups,
         query_positions,
-        sequence_lengths,
+        row_sequence_lengths,
+        visible_groups,
         token_to_req,
+        sequence_lengths.shape[0],
         compress_ratio,
         token_topk,
-        out[:, :packed_width],
+        out,
     )
     return out

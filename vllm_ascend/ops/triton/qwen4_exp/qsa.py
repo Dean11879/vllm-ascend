@@ -12,56 +12,47 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 def _pack_qsa_group_indices_kernel(
     block_indices_ptr,
     query_positions_ptr,
-    sequence_lengths_ptr,
+    row_sequence_lengths_ptr,
+    visible_groups_ptr,
     token_to_req_ptr,
     output_ptr,
+    num_requests,
     stride_blocks_row,
     stride_blocks_column,
     stride_output_row,
     stride_output_column,
-    rows,
-    num_requests,
     BLOCK_TOPK: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     OUTPUT_WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
-    columns = tl.arange(0, OUTPUT_WIDTH)
-    query_position = tl.load(query_positions_ptr + row)
+    columns = tl.arange(0, BLOCK)
+    # Reuse the bound already supplied to LightningIndexer. Some CANN builds
+    # do not initialize unused output slots when the visible key length is zero.
     request = tl.load(token_to_req_ptr + row)
-    safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
-    sequence_length = tl.load(
-        sequence_lengths_ptr + safe_request,
-        mask=(request >= 0) & (request < num_requests),
-        other=0,
-    )
-    complete_groups = tl.minimum(
-        tl.minimum(
-            (query_position + 1) // COMPRESS_RATIO,
-            sequence_length // COMPRESS_RATIO,
-        ),
-        BLOCK_TOPK,
-    )
-    complete_groups = tl.maximum(complete_groups, 0).to(tl.int32)
-    is_group = columns < BLOCK_TOPK
-    safe_group_column = tl.minimum(columns, BLOCK_TOPK - 1)
+    valid_request = (request >= 0) & (request < num_requests)
+    complete_groups = tl.load(visible_groups_ptr + row, mask=valid_request, other=0)
     group = tl.load(
-        block_indices_ptr + row * stride_blocks_row + safe_group_column * stride_blocks_column,
-        mask=is_group & (columns < complete_groups),
+        block_indices_ptr + row * stride_blocks_row + columns * stride_blocks_column,
+        mask=(columns < BLOCK_TOPK) & (columns < complete_groups),
         other=-1,
     )
+    query_position = tl.load(query_positions_ptr + row)
+    sequence_length = tl.load(row_sequence_lengths_ptr + row, mask=valid_request, other=0)
     tail_offset = columns - BLOCK_TOPK
     tail_start = ((query_position + 1) // COMPRESS_RATIO) * COMPRESS_RATIO
-    tail_count = tl.minimum((query_position + 1) - tail_start, COMPRESS_RATIO - 1)
-    # Keep wide scalar position arithmetic, but use bounded int32 vectors.
+    tail_count = (query_position + 1) - tail_start
     valid_tail_count = tl.maximum(tl.minimum(tail_count, sequence_length - tail_start), 0).to(tl.int32)
     tail = tail_start.to(tl.int32) + tail_offset
-    valid_tail = (~is_group) & (tail_offset >= 0) & (tail_offset < valid_tail_count)
-    packed = tl.where(is_group, group, tl.where(valid_tail, tail, -1))
+    valid_tail = (tail_offset >= 0) & (tail_offset < valid_tail_count)
+    # Preserve the complete upstream ABI (including residual tokens for MTP
+    # row copies), and initialize unused columns in this same write.
+    packed = tl.where(columns < BLOCK_TOPK, group, tl.where(valid_tail, tail, -1))
     tl.store(
         output_ptr + row * stride_output_row + columns * stride_output_column,
         packed,
-        mask=(row < rows) & (columns < OUTPUT_WIDTH),
+        mask=columns < OUTPUT_WIDTH,
     )
 
 
@@ -241,23 +232,29 @@ def _compress_qsa_groups_kernel(
 def pack_qsa_group_indices_npu(
     block_indices: torch.Tensor,
     query_positions: torch.Tensor,
-    sequence_lengths: torch.Tensor,
+    row_sequence_lengths: torch.Tensor,
+    visible_groups: torch.Tensor,
     token_to_req: torch.Tensor,
+    num_requests: int,
     compress_ratio: int,
     token_topk: int,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Pack LI-v2 groups and the open-group tail into one fixed buffer."""
+    """Write padded LI groups, residual tokens and unused ABI columns once.
+
+    Per-query lengths and visible group counts are reused from the Indexer
+    caller. Mask unused candidate slots rather than relying on CANN padding.
+    """
     if block_indices.device.type != "npu" or not HAS_TRITON:
         raise RuntimeError("QSA NPU compact packing requires Triton")
     if token_topk % compress_ratio:
         raise ValueError("QSA token top-k must be divisible by compression ratio")
     block_topk = token_topk // compress_ratio
-    output_width = block_topk + compress_ratio - 1
+    output_width = token_topk + compress_ratio - 1
     if block_indices.shape != (query_positions.numel(), block_topk):
         raise ValueError("QSA compressed top-k has an invalid shape")
-    if token_to_req.shape != query_positions.shape:
-        raise ValueError("QSA request mapping must match query positions")
+    if any(t.shape != query_positions.shape for t in (row_sequence_lengths, visible_groups, token_to_req)):
+        raise ValueError("QSA per-query lengths must match query positions")
     if out is None:
         out = torch.empty(
             (block_indices.shape[0], output_width),
@@ -265,24 +262,25 @@ def pack_qsa_group_indices_npu(
             device=block_indices.device,
         )
     elif out.shape != (block_indices.shape[0], output_width):
-        raise ValueError("QSA compact selection output has an invalid shape")
+        raise ValueError("QSA selection output has an invalid shape")
     if not block_indices.shape[0]:
         return out
     _pack_qsa_group_indices_kernel[(block_indices.shape[0],)](
         block_indices,
         query_positions,
-        sequence_lengths,
+        row_sequence_lengths,
+        visible_groups,
         token_to_req,
         out,
+        num_requests,
         block_indices.stride(0),
         block_indices.stride(1),
         out.stride(0),
         out.stride(1),
-        block_indices.shape[0],
-        sequence_lengths.shape[0],
         BLOCK_TOPK=block_topk,
         COMPRESS_RATIO=compress_ratio,
         OUTPUT_WIDTH=output_width,
+        BLOCK=triton.next_power_of_2(output_width),
         num_warps=1,
     )
     return out

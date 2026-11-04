@@ -156,7 +156,10 @@ def test_empty_preparation():
 
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-def test_pack_wide_positions_and_strided_buffers(dtype):
+@pytest.mark.parametrize("stride", [1, 2])
+@pytest.mark.parametrize("length_cap", [None, 0, 17])
+@pytest.mark.parametrize("request_id", [-1, 0, 1])
+def test_pack_wide_positions_and_strided_buffers(dtype, stride, length_cap, request_id):
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/ops/triton/qwen4_exp/qsa.py"
     module = ast.parse(source.read_text())
     kernel_node = next(
@@ -170,37 +173,51 @@ def test_pack_wide_positions_and_strided_buffers(dtype):
     namespace = {"tl": language}
     exec(compile(module, str(source), "exec"), namespace)
     kernel = _Kernel(namespace["_pack_qsa_group_indices_kernel"], language)
-    positions = torch.tensor([-2, -1, 0, 1, 2, 3, 4, 7, 2047, 4095, 16383, 2147483646], dtype=dtype)
+    positions = torch.tensor(
+        [-1, 0, 1, 2, 3, 4, 13, 14, 15, 2043, 2044, 2045, 2046, 2047, 2048, 2049, 2050, 2051, 4095, 16383, 2147483646],
+        dtype=dtype,
+    )
     rows = positions.numel()
-    indices = torch.arange(rows * 1024, dtype=torch.int32).reshape(rows, 1024)[:, ::2]
-    lengths = torch.tensor([0, 4096, 32768], dtype=dtype)
-    for request_id in [-1, 0, 1, 2, 3]:
-        requests = torch.full((rows,), request_id, dtype=torch.int32)
-        storage = torch.full((rows, 2051), -777, dtype=torch.int32)
-        output = storage[:, :515]
+    lengths = (positions + 1).clamp_min(0)
+    if length_cap is not None:
+        lengths.clamp_max_(length_cap)
+    visible_groups = torch.minimum((positions + 1) // 4, lengths // 4).to(torch.int32)
+    indices = torch.full((rows, 512 * stride), 777, dtype=torch.int32)[:, ::stride]
+    expected = torch.full((rows, 2051), -1, dtype=torch.int32)
+    for row, position in enumerate(positions.tolist()):
+        complete = min(int(visible_groups[row]), 512)
+        # Poison unused LI slots: some CANN packages leave them unwritten.
+        # Reverse valid IDs to catch accidental index sorting.
+        indices[row, :complete] = torch.arange(complete - 1, -1, -1, dtype=torch.int32)
+        expected[row, :complete] = indices[row, :complete]
+        start = ((position + 1) // 4) * 4
+        for offset in range((position + 1) % 4):
+            if start + offset < int(lengths[row]):
+                expected[row, 512 + offset] = start + offset
+    if request_id != 0:
+        expected.fill_(-1)
+    requests = torch.full((rows,), request_id, dtype=torch.int32)
+    storage = torch.full((rows, 2051 * stride + 7), -777, dtype=torch.int32)
+    output = storage[:, : 2051 * stride : stride]
+    for poison in [-777, 12345]:
+        output.fill_(poison)
         kernel[(rows,)](
             indices,
             positions,
             lengths,
+            visible_groups,
             requests,
             output,
+            1,
             *indices.stride(),
             *output.stride(),
-            rows,
-            3,
             BLOCK_TOPK=512,
             COMPRESS_RATIO=4,
-            OUTPUT_WIDTH=515,
+            OUTPUT_WIDTH=2051,
+            BLOCK=4096,
             num_warps=1,
         )
-        expected = torch.full_like(storage, -777)
-        for row, position in enumerate(positions.tolist()):
-            length = int(lengths[request_id]) if 0 <= request_id < 3 else 0
-            complete = max(0, min((position + 1) // 4, length // 4, 512))
-            expected[row, :515] = -1
-            expected[row, :complete] = indices[row, :complete]
-            start = ((position + 1) // 4) * 4
-            for offset in range(3):
-                if offset < (position + 1) - start and start + offset < length:
-                    expected[row, 512 + offset] = start + offset
-        torch.testing.assert_close(storage, expected, rtol=0, atol=0)
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+        assert (storage[:, 2051 * stride :] == -777).all()
+        if stride == 2:
+            assert (storage[:, 1 : 2051 * stride : 2] == -777).all()
