@@ -25,6 +25,10 @@ def build_qsa_union_inputs(
     """Group one request without altering its selected blocks or tail policy."""
     if sparse_idx.ndim != 3 or sparse_idx.shape[0] != 1:
         raise ValueError("Union preparation requires one KV head")
+    if sparse_idx.device.type == "npu":
+        from vllm_ascend.ops.triton.qwen4_exp.gbsa_union import build_qsa_union_inputs_fused
+
+        return build_qsa_union_inputs_fused(sparse_idx, sparse_count, visible)
     rows, topk = sparse_idx.shape[1:]
     groups = (rows + UNION_SIZE - 1) // UNION_SIZE
     width = UNION_SIZE * topk
@@ -170,10 +174,15 @@ def qsa_union_gbsa_attention(
         raise ValueError("Union GBSA requires one KV head and at most 16 Q heads per launch")
     if block_table.shape[1] * GBSA_PAGE_SIZE > (1 << 23):
         raise ValueError("Union index encoding exceeds exact FP32 sort range")
-    sparse_idx, sparse_count, visible, _, _ = prepare_qsa_gbsa_inputs(
-        compact_indices, logical_positions, seq_lens, token_to_req, block_table, 1, write_row_metadata=False
-    )
-    union_inputs = build_qsa_union_inputs(sparse_idx, sparse_count, visible)
+    if query.device.type == "npu":
+        from vllm_ascend.ops.triton.qwen4_exp.gbsa_union import prepare_and_build_qsa_union_inputs
+
+        union_inputs = prepare_and_build_qsa_union_inputs(compact_indices, logical_positions, seq_lens, token_to_req)
+    else:
+        sparse_idx, sparse_count, visible, _, _ = prepare_qsa_gbsa_inputs(
+            compact_indices, logical_positions, seq_lens, token_to_req, block_table, 1, write_row_metadata=False
+        )
+        union_inputs = build_qsa_union_inputs(sparse_idx, sparse_count, visible)
     rows = query.shape[0]
     cu_q = torch.tensor([0, rows], dtype=torch.int64, device=query.device)
     return _run_union_gbsa(
