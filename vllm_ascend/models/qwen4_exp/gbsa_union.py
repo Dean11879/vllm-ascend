@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Experimental prefill-only union GBSA integration for Qwen4Exp.
 
-The private custom-op package is required; decode keeps the stock GBSA path.
+The official transformer operator package is required; decode keeps the stock GBSA path.
 Union construction stays on the device, including the exact per-query mask.
 """
 
@@ -168,7 +168,7 @@ def qsa_union_gbsa_attention(
 ) -> torch.Tensor:
     # Lazy import isolates the optional vendor package from model discovery and
     # from stock decode/graph capture. Missing support must fail visibly.
-    import cann_ops_transformer_gbsa_union as union_ops
+    from vllm_ascend.ops import gbsa as union_ops
 
     if key_cache.shape[2] != 1 or query.shape[1] > 16:
         raise ValueError("Union GBSA requires one KV head and at most 16 Q heads per launch")
@@ -254,7 +254,7 @@ def qsa_union_gbsa_attention_batch(
     request_indices: tuple[int, ...],
 ) -> torch.Tensor:
     """Run adjacent packed Prefill requests in one union GBSA launch."""
-    import cann_ops_transformer_gbsa_union as union_ops
+    from vllm_ascend.ops import gbsa as union_ops
 
     if not request_indices or len(request_indices) + 1 != len(query_starts):
         raise ValueError("Each packed query segment must have one request")
